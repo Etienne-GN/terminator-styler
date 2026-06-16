@@ -1461,12 +1461,8 @@ class TerminatorStyler(plugin.MenuItem):
         for t in self.terminator.terminals:
             self._connect_terminal(t)
 
-        item = Gtk.MenuItem.new_with_mnemonic(_('_Styler'))
-        submenu = Gtk.Menu()
-        item.set_submenu(submenu)
-        prefs = Gtk.MenuItem.new_with_mnemonic(_('_Preferences…'))
-        prefs.connect('activate', self.configure)
-        submenu.append(prefs)
+        item = Gtk.MenuItem.new_with_mnemonic(_('_Styler Preferences…'))
+        item.connect('activate', self.configure)
         menuitems.append(item)
 
     # ── unified Preferences dialog ──────────────────────────────────────────
