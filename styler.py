@@ -197,8 +197,12 @@ class BadgeIndicator(object):
             return
         label = terminal.titlebar.label
         text = label.get_text()
-        if not text.endswith(marker):
-            label.set_text(text + marker)
+        # Strip any pre-existing trailing markers, then append exactly one.
+        # Terminator can re-set the label between our updates, leading to
+        # repeated appends if we only check endswith().
+        while text.endswith(marker):
+            text = text[:-len(marker)]
+        label.set_text(text + marker)
 
     def clear(self, terminal):
         marker = self._markers.pop(terminal, None)
@@ -230,9 +234,11 @@ class TitleIndicator(object):
         self._markers[terminal] = marker
         window = terminal.get_toplevel()
 
-        if window not in self._orig_window:
-            self._orig_window[window] = window.get_title() or ''
-        window.set_title(self._orig_window[window] + marker)
+        base = window.get_title() or ''
+        while base.endswith(marker):
+            base = base[:-len(marker)]
+        self._orig_window[window] = base
+        window.set_title(base + marker)
         if terminal not in self._handlers:
             self._handlers[terminal] = terminal.connect_after(
                 'title-change', self._on_title_change)
@@ -243,9 +249,12 @@ class TitleIndicator(object):
             if tabnum != -1:
                 page = notebook.get_nth_page(tabnum)
                 tablabel = notebook.get_tab_label(page)
-                if tablabel is not None and tablabel not in self._orig_tab:
-                    self._orig_tab[tablabel] = tablabel.get_label()
-                    tablabel.set_label(self._orig_tab[tablabel] + marker)
+                if tablabel is not None:
+                    tab_text = tablabel.get_label() or ''
+                    while tab_text.endswith(marker):
+                        tab_text = tab_text[:-len(marker)]
+                    self._orig_tab[tablabel] = tab_text
+                    tablabel.set_label(tab_text + marker)
 
     def _on_title_change(self, terminal, *_args):
         marker = self._markers.get(terminal)
@@ -253,9 +262,10 @@ class TitleIndicator(object):
             return
         window = terminal.get_toplevel()
         base = window.get_title() or ''
-        if not base.endswith(marker):
-            self._orig_window[window] = base
-            window.set_title(base + marker)
+        while base.endswith(marker):
+            base = base[:-len(marker)]
+        self._orig_window[window] = base
+        window.set_title(base + marker)
 
         notebook = _find_notebook(window)
         if notebook is not None:
@@ -264,10 +274,11 @@ class TitleIndicator(object):
                 page = notebook.get_nth_page(tabnum)
                 tablabel = notebook.get_tab_label(page)
                 if tablabel is not None:
-                    base_tab = tablabel.get_label()
-                    if not base_tab.endswith(marker):
-                        self._orig_tab[tablabel] = base_tab
-                        tablabel.set_label(base_tab + marker)
+                    base_tab = tablabel.get_label() or ''
+                    while base_tab.endswith(marker):
+                        base_tab = base_tab[:-len(marker)]
+                    self._orig_tab[tablabel] = base_tab
+                    tablabel.set_label(base_tab + marker)
 
     def clear(self, terminal):
         marker = self._markers.pop(terminal, None)
