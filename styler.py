@@ -758,10 +758,13 @@ class TerminatorStyler(plugin.MenuItem):
 
     def _connect_terminal(self, terminal):
         # WindowStyler.
+        # Called from the 500 ms scan too, so only touch CSS that is not yet
+        # in place; reloading a provider re-styles the whole window.
         if self.enable_window:
             self._ws_set_vte_margin(terminal, self.ws_padding)
             window = terminal.get_toplevel()
-            if isinstance(window, Gtk.Window):
+            if isinstance(window, Gtk.Window) \
+                    and window not in self.ws_providers:
                 self._ws_apply_window_radius(window)
 
         # MaximiseIndicator.
@@ -784,8 +787,9 @@ class TerminatorStyler(plugin.MenuItem):
             if self.enable_profileswitcher and terminal not in self.ps_watched:
                 self._ps_watch(terminal)
             if self.enable_scrollbar:
-                self._sb_tint(terminal,
-                              terminal.get_profile() or DEFAULT_PROFILE)
+                profile = terminal.get_profile() or DEFAULT_PROFILE
+                if self.sb_last.get(terminal) != profile:
+                    self._sb_tint(terminal, profile)
 
     def _disconnect_terminal(self, terminal):
         # MaximiseIndicator.
