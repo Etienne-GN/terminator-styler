@@ -1517,70 +1517,76 @@ class TerminatorStyler(plugin.MenuItem):
         dialog.vbox.pack_start(notebook, True, True, 6)
         dialog.show_all()
 
-        if dialog.run() == Gtk.ResponseType.ACCEPT:
-            old_enable_titlebar = self.enable_titlebar
-            old_enable_maximise = self.enable_maximise
-            for cb in commit_callbacks:
-                cb()
+        try:
+            if dialog.run() == Gtk.ResponseType.ACCEPT:
+                self._apply_preferences(commit_callbacks)
+        except Exception as ex:
+            err('Styler: applying preferences failed: %s' % ex)
+        finally:
+            dialog.destroy()
 
-            # Rewire features that flipped on/off.
-            if old_enable_titlebar and not self.enable_titlebar:
-                self._tb_clear_all_window_css()
-                self._tb_clear_all_titlebar_css()
-                for t in list(self.tb_watched):
-                    self._tb_unwatch(t)
-                TerminatorStyler._uninstall_titlebar_patch(self)
-            elif not old_enable_titlebar and self.enable_titlebar:
-                TerminatorStyler._install_titlebar_patch(self)
-                for t in list(self.terminator.terminals):
-                    self._tb_watch(t)
+    def _apply_preferences(self, commit_callbacks):
+        old_enable_titlebar = self.enable_titlebar
+        old_enable_maximise = self.enable_maximise
+        for cb in commit_callbacks:
+            cb()
 
-            if old_enable_maximise != self.enable_maximise:
-                if not self.enable_maximise:
-                    for terminal in list(self.mx_handlers.keys()):
-                        self._mx_clear_all(terminal)
-                        for hid in self.mx_handlers.pop(terminal, []):
-                            try:
-                                terminal.disconnect(hid)
-                            except Exception:
-                                pass
-                    self.mx_indicators = []
-                else:
-                    self.mx_indicators = self._build_mx_indicators()
-                    for t in list(self.terminator.terminals):
-                        if t not in self.mx_handlers:
-                            ids = [
-                                t.connect_after('maximise',
-                                                self._mx_on_maximise),
-                                t.connect_after('zoom',
-                                                self._mx_on_maximise),
-                                t.connect_after('unzoom',
-                                                self._mx_on_unmaximise),
-                            ]
-                            self.mx_handlers[t] = ids
+        # Rewire features that flipped on/off.
+        if old_enable_titlebar and not self.enable_titlebar:
+            self._tb_clear_all_window_css()
+            self._tb_clear_all_titlebar_css()
+            for t in list(self.tb_watched):
+                self._tb_unwatch(t)
+            TerminatorStyler._uninstall_titlebar_patch(self)
+        elif not old_enable_titlebar and self.enable_titlebar:
+            TerminatorStyler._install_titlebar_patch(self)
+            for t in list(self.terminator.terminals):
+                self._tb_watch(t)
+
+        if old_enable_maximise != self.enable_maximise:
+            if not self.enable_maximise:
+                for terminal in list(self.mx_handlers.keys()):
+                    self._mx_clear_all(terminal)
+                    for hid in self.mx_handlers.pop(terminal, []):
+                        try:
+                            terminal.disconnect(hid)
+                        except Exception:
+                            pass
+                self.mx_indicators = []
             else:
-                if self.enable_maximise:
-                    self._mx_rebuild_indicators()
+                self.mx_indicators = self._build_mx_indicators()
+                for t in list(self.terminator.terminals):
+                    if t not in self.mx_handlers:
+                        ids = [
+                            t.connect_after('maximise',
+                                            self._mx_on_maximise),
+                            t.connect_after('zoom',
+                                            self._mx_on_maximise),
+                            t.connect_after('unzoom',
+                                            self._mx_on_unmaximise),
+                        ]
+                        self.mx_handlers[t] = ids
+        else:
+            if self.enable_maximise:
+                self._mx_rebuild_indicators()
 
-            self._save_config()
+        self._save_config()
 
-            # Re-evaluate state for every terminal.
-            if self.enable_titlebar:
-                for terminal in self.tb_watched:
-                    self._tb_check_and_set(
-                        terminal, terminal.get_window_title() or '')
-                    self._tb_dispatch_update(terminal)
-            if self.enable_window:
-                self._ws_apply_all()
-            if self.enable_scrollbar:
-                for terminal in list(self.terminator.terminals):
-                    try:
-                        prof = terminal.get_profile() or DEFAULT_PROFILE
-                    except Exception:
-                        prof = DEFAULT_PROFILE
-                    self._sb_tint(terminal, prof)
-
-        dialog.destroy()
+        # Re-evaluate state for every terminal.
+        if self.enable_titlebar:
+            for terminal in self.tb_watched:
+                self._tb_check_and_set(
+                    terminal, terminal.get_window_title() or '')
+                self._tb_dispatch_update(terminal)
+        if self.enable_window:
+            self._ws_apply_all()
+        if self.enable_scrollbar:
+            for terminal in list(self.terminator.terminals):
+                try:
+                    prof = terminal.get_profile() or DEFAULT_PROFILE
+                except Exception:
+                    prof = DEFAULT_PROFILE
+                self._sb_tint(terminal, prof)
 
     # ── Preferences tabs ────────────────────────────────────────────────────
 
