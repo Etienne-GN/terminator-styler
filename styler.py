@@ -1,6 +1,6 @@
 # Terminator Styler - unified plugin
 #
-# Merges four previously separate Terminator plugins into one:
+# Merges previously separate Terminator plugins into one:
 #   - WindowStyler        : round window corners + internal VTE padding
 #   - MaximiseIndicator   : badge / title / border cue when panes are hidden
 #                           by a maximised pane (border can follow the focused
@@ -12,16 +12,30 @@
 #                           or follow the active profile
 #   - ProfileSwitcher     : auto-switch Terminator profile based on the
 #                           foreground command + argv in each terminal
+#   - Degauss             : CRT degauss animation (+ optional sound) on a
+#                           pane, from the context menu or the `degauss`
+#                           command (degauss.py) via a Unix socket
 #
-# Configure via right-click menu: Styler -> Preferences (one dialog with one
+# Configure via right-click menu: Styler Preferences… (one dialog with one
 # tab per feature). On first load, settings from the old plugins
 # (TitlebarChanger or its predecessor TitleReact, ProfileSwitcher,
 # WindowStyler, MaximiseAware) are migrated automatically.
 
+import atexit
 import os
 import re
 import fnmatch
+import math
+import random
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+import wave
+from array import array
 
+import cairo
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GObject, GLib
@@ -47,6 +61,176 @@ _CORNER_RADIUS = 12
 
 (COL_ENABLED, COL_NAME, COL_PATTERN, COL_BG, COL_FG) = range(5)
 (COL_COMMAND, COL_ARGUMENT, COL_PROFILE) = (0, 1, 2)
+
+
+# ── degauss shared: begin ── (identical copy in degauss.py; see tests)
+
+DG_DEFAULTS = {
+    'effect':            'wobble',
+    'duration':          1.9,
+    'flash':             True,
+    'sound':             False,
+    'volume':            30,
+    'mains_hz':          60,
+    'player':            'auto',
+    'wobble_strength':   100,
+    'strip_px':          2,
+    'blotches':          False,
+    'blotches_count':    3,
+    'blotches_strength': 100,
+    'pattern_rainbow':   100,
+    'pattern_fps':       30,
+}
+
+DG_CHOICES = {
+    'effect':   ('wobble', 'pattern'),
+    'mains_hz': (50, 60),
+    'player':   ('auto', 'pw-play', 'paplay', 'aplay'),
+}
+
+DG_RANGES = {
+    'duration':          (0.5, 5.0),
+    'volume':            (0, 100),
+    'wobble_strength':   (0, 200),
+    'strip_px':          (1, 8),
+    'blotches_count':    (1, 8),
+    'blotches_strength': (0, 100),
+    'pattern_rainbow':   (0, 100),
+    'pattern_fps':       (10, 60),
+}
+
+DG_RATE = 44100
+
+DG_BARS_TOP = [(192, 192, 192), (192, 192, 0), (0, 192, 192), (0, 192, 0),
+               (192, 0, 192), (192, 0, 0), (0, 0, 192)]
+DG_BARS_MID = [(0, 0, 192), (19, 19, 19), (192, 0, 192), (19, 19, 19),
+               (0, 192, 192), (19, 19, 19), (192, 192, 192)]
+DG_BARS_LOW = [(0, 33, 76), (255, 255, 255), (50, 0, 106), (19, 19, 19),
+               (9, 9, 9), (19, 19, 19), (29, 29, 29), (19, 19, 19)]
+
+
+def dg_settings(raw):
+    """Parse dg_* keys from a config block; bad or missing values fall
+    back to DG_DEFAULTS, numbers are clamped to DG_RANGES."""
+    out = dict(DG_DEFAULTS)
+    for key, default in DG_DEFAULTS.items():
+        value = raw.get('dg_' + key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if isinstance(default, bool):
+            out[key] = text.lower() in ('1', 'true', 'yes', 'on')
+        elif key in DG_CHOICES:
+            for choice in DG_CHOICES[key]:
+                if text == str(choice):
+                    out[key] = choice
+        else:
+            try:
+                num = float(text)
+            except ValueError:
+                continue
+            if num != num:
+                continue
+            lo, hi = DG_RANGES[key]
+            num = max(lo, min(hi, num))
+            out[key] = int(round(num)) if isinstance(default, int) else num
+    return out
+
+
+def dg_bars():
+    """SMPTE-style color bars as (x0, x1, y0, y1, rgb) in fractions of
+    the pane."""
+    top, mid = 0.67, 0.75
+    rects = []
+    for i, rgb in enumerate(DG_BARS_TOP):
+        rects.append((i / 7.0, (i + 1) / 7.0, 0.0, top, rgb))
+    for i, rgb in enumerate(DG_BARS_MID):
+        rects.append((i / 7.0, (i + 1) / 7.0, top, mid, rgb))
+    for i, rgb in enumerate(DG_BARS_LOW[:4]):
+        rects.append((i * 5 / 28.0, (i + 1) * 5 / 28.0, mid, 1.0, rgb))
+    for i, rgb in enumerate(DG_BARS_LOW[4:]):
+        x0 = 5 / 7.0 + i * 2 / 28.0
+        rects.append((x0, x0 + 2 / 28.0, mid, 1.0, rgb))
+    return rects
+
+
+def dg_hue(h):
+    h = (h % 1.0) * 6
+    c = int(h)
+    f = h - c
+    return [(1, f, 0), (1 - f, 1, 0), (0, 1, f),
+            (0, 1 - f, 1), (f, 0, 1), (1, 0, 1 - f)][c % 6]
+
+
+def dg_sound_seconds(s):
+    return s['duration'] + 0.3
+
+
+def dg_wav_path(s):
+    cache = os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache')
+    return os.path.join(cache, 'degauss', 'degauss-v2-%.2fs-%dhz-vol%03d.wav'
+                        % (dg_sound_seconds(s), s['mains_hz'], s['volume']))
+
+
+def dg_synth(path, seconds, mains_hz, volume):
+    """Write the thunk + mains hum as a mono 16-bit WAV at path."""
+    rng = random.Random(1995)
+    n = int(DG_RATE * seconds)
+    samples = []
+    peak = 0.0
+    for i in range(n):
+        t = i / DG_RATE
+        thunk = math.exp(-t / 0.045) * (math.sin(2 * math.pi * 45 * t)
+                                        + 0.6 * (rng.random() * 2 - 1))
+        ring = (0.35 * math.exp(-t / 0.25) * math.sin(2 * math.pi * 310 * t)
+                * math.sin(2 * math.pi * 3 * t))
+        attack = min(1.0, t / 0.02)
+        hum_env = attack * math.exp(-t / 0.55)
+        base = math.sin(2 * math.pi * mains_hz * t)
+        buzz = (math.tanh(4.0 * base) * 0.6
+                + 0.4 * math.sin(2 * math.pi * 2 * mains_hz * t))
+        chatter = (0.25 * math.tanh(8.0 * math.sin(2 * math.pi * 2 * mains_hz * t))
+                   * (rng.random() * 0.5 + 0.5))
+        s = thunk + ring + hum_env * (buzz + chatter)
+        samples.append(s)
+        peak = max(peak, abs(s))
+    fade = int(DG_RATE * 0.05)
+    out = array('h')
+    for i, s in enumerate(samples):
+        if i > n - fade:
+            s *= (n - i) / fade
+        out.append(int(s / peak * volume * 32767))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.part')
+    try:
+        with os.fdopen(fd, 'wb') as f, wave.open(f, 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(DG_RATE)
+            w.writeframes(out.tobytes())
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def dg_ensure_wav(s):
+    path = dg_wav_path(s)
+    if not os.path.exists(path):
+        dg_synth(path, dg_sound_seconds(s), s['mains_hz'], s['volume'] / 100.0)
+    return path
+
+
+def dg_player(name):
+    if name == 'auto':
+        for candidate in ('pw-play', 'paplay', 'aplay'):
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return None
+    return shutil.which(name)
+
+# ── degauss shared: end ──
 
 
 # ─── color helpers (from TitlebarChanger) ────────────────────────────────────
@@ -307,6 +491,223 @@ class TitleIndicator(object):
                     tablabel.set_label(self._orig_tab.pop(tablabel))
 
 
+# ─── Degauss (from the standalone degauss plugin) ────────────────────────────
+
+DG_SOCKET = 'terminator-styler-degauss-%d.sock'
+DG_SWIRL_COLS = 48
+DG_BLOTCH_SCALE = 8
+
+
+def _dg_socket_path():
+    rundir = os.environ.get('XDG_RUNTIME_DIR')
+    if not rundir:
+        return None
+    return os.path.join(rundir, DG_SOCKET % os.getpid())
+
+
+def _dg_surface(widget):
+    alloc = widget.get_allocation()
+    if alloc.width <= 1 or alloc.height <= 1 or not widget.get_mapped():
+        return None
+    scale = widget.get_scale_factor()
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32,
+                                 alloc.width * scale, alloc.height * scale)
+    surface.set_device_scale(scale, scale)
+    return surface, alloc.width, alloc.height
+
+
+def _dg_snapshot(widget):
+    made = _dg_surface(widget)
+    if made is None:
+        return None
+    surface = made[0]
+    widget.draw(cairo.Context(surface))
+    return surface
+
+
+def _dg_bars_surface(widget):
+    made = _dg_surface(widget)
+    if made is None:
+        return None
+    surface, w, h = made
+    cr = cairo.Context(surface)
+    for x0, x1, y0, y1, (r, g, b) in dg_bars():
+        cr.set_source_rgb(r / 255.0, g / 255.0, b / 255.0)
+        cr.rectangle(math.floor(x0 * w), math.floor(y0 * h),
+                     math.ceil((x1 - x0) * w) + 1, math.ceil((y1 - y0) * h) + 1)
+        cr.fill()
+    return surface
+
+
+def _dg_swirl_surface(w, h, t, decay, amount):
+    """Rainbow swirl of the terminal Test pattern, rendered on a coarse
+    grid and scaled up by the caller (per-pixel hue in Python is too slow
+    for a full pane)."""
+    cols = DG_SWIRL_COLS
+    rows = max(2, int(round(cols * h / float(w))))
+    stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_ARGB32,
+                                                        cols)
+    data = bytearray(stride * rows)
+    cx, cy = cols / 2.0, rows / 2.0
+    spin = t * 7.0
+    for y in range(rows):
+        ey = (y + 0.5 - cy) / cy * 0.5
+        for x in range(cols):
+            ex = (x + 0.5 - cx) / cx
+            dist = math.hypot(ex, ey)
+            alpha = decay * amount * (0.35 + 0.65 * min(1.0, dist))
+            if alpha <= 0.0:
+                continue
+            r, g, b = dg_hue(math.atan2(ey, ex) / (2 * math.pi)
+                             + dist * 0.7 - spin)
+            a = min(1.0, alpha)
+            i = y * stride + x * 4
+            # ARGB32 is native-endian premultiplied: BGRA on little-endian.
+            data[i]     = int(b * a * 255)
+            data[i + 1] = int(g * a * 255)
+            data[i + 2] = int(r * a * 255)
+            data[i + 3] = int(a * 255)
+    return cairo.ImageSurface.create_for_data(
+        data, cairo.FORMAT_ARGB32, cols, rows, stride), cols, rows
+
+
+def _dg_paint(cr, source, w, h, t, s, mode, rng):
+    """One frame: source (pane snapshot or color bars) shaken in strips,
+    then the mode's color overlay and the initial flash."""
+    pattern = mode == 'pattern'
+    decay = math.exp(-t / 0.42)
+    strength = s['wobble_strength'] / 100.0
+    strip = s['strip_px']
+
+    cr.set_operator(cairo.OPERATOR_SOURCE)
+    cr.set_source_rgb(0, 0, 0)
+    cr.paint()
+    cr.set_operator(cairo.OPERATOR_OVER)
+
+    cr.save()
+    breathe = 1 + 0.04 * decay * strength * math.sin(2 * math.pi * 4 * t)
+    cr.translate(w / 2, h / 2)
+    cr.scale(breathe, breathe)
+    cr.translate(-w / 2, -h / 2)
+    dy = (h * (0.04 if pattern else 0.03) * decay * strength
+          * math.sin(2 * math.pi * 9 * t))
+    amp = w * (0.12 if pattern else 0.06) * decay * strength
+    y = 0
+    while y < h:
+        dx = (amp * math.sin(2 * math.pi * 6 * t + y * 0.02)
+              + amp * 0.25 * math.sin(2 * math.pi * 23 * t + y * 0.11))
+        if pattern:
+            dx += (rng.random() - 0.5) * amp * 0.3
+        cr.set_source_surface(source, dx, dy)
+        cr.rectangle(0, y, w, strip)
+        cr.fill()
+        y += strip
+    cr.restore()
+
+    if pattern and s['pattern_rainbow'] > 0 and decay > 0.02:
+        swirl, cols, rows = _dg_swirl_surface(
+            w, h, t, decay, s['pattern_rainbow'] / 100.0)
+        cr.save()
+        cr.scale(w / float(cols), h / float(rows))
+        cr.set_source_surface(swirl, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+        cr.paint()
+        cr.restore()
+
+    if not pattern and s['blotches'] and decay > 0.02:
+        # The standalone plugin blended each blotch with HSL_COLOR at full
+        # resolution, too slow for a large pane at frame rate. A coarse
+        # layer blended with OVERLAY looks the same: dark stays dark.
+        count = s['blotches_count']
+        amount = decay * s['blotches_strength'] / 100.0
+        k = DG_BLOTCH_SCALE
+        lw, lh = max(1, int(w / k)), max(1, int(h / k))
+        layer = cairo.ImageSurface(cairo.FORMAT_ARGB32, lw, lh)
+        lcr = cairo.Context(layer)
+        radius = max(lw, lh) * 0.45
+        for i in range(count):
+            a = i * 2 * math.pi / count + t * 3.5
+            bx = lw / 2 + math.cos(a) * lw * 0.28
+            by = lh / 2 + math.sin(a) * lh * 0.28
+            r, g, b = dg_hue(i / float(count) + t * 0.8)
+            grad = cairo.RadialGradient(bx, by, 0, bx, by, radius)
+            grad.add_color_stop_rgba(0, r, g, b, 1)
+            grad.add_color_stop_rgba(1, r, g, b, 0)
+            lcr.set_source(grad)
+            lcr.paint()
+        cr.save()
+        cr.scale(w / float(lw), h / float(lh))
+        for op, alpha in ((cairo.OPERATOR_OVERLAY, amount),
+                          (cairo.OPERATOR_ADD, amount * 0.12)):
+            cr.set_operator(op)
+            cr.set_source_surface(layer, 0, 0)
+            cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+            cr.paint_with_alpha(alpha)
+        cr.restore()
+
+    if s['flash']:
+        flash = 0.55 * math.exp(-t / 0.07)
+        if flash > 0.01:
+            cr.set_operator(cairo.OPERATOR_ADD)
+            cr.set_source_rgba(1, 1, 1, flash)
+            cr.paint()
+    cr.set_operator(cairo.OPERATOR_OVER)
+
+
+class DegaussEffect(object):
+    """Runs one degauss animation on a widget by overriding its draw."""
+
+    def __init__(self, widget, source, settings, on_done):
+        self.widget = widget
+        self.source = source
+        self.s = settings
+        self.mode = settings['effect']
+        self.on_done = on_done
+        self.rng = random.Random()
+        self.start = None
+        self.t = 0.0
+        self.draw_id = widget.connect('draw', self._on_draw)
+        self.unmap_id = widget.connect('unmap', lambda _w: self.stop())
+        self.tick_id = widget.add_tick_callback(self._on_tick)
+        widget.queue_draw()
+
+    def _on_tick(self, widget, clock):
+        now = clock.get_frame_time() / 1e6
+        if self.start is None:
+            self.start = now
+        self.t = now - self.start
+        if self.t >= self.s['duration']:
+            self.tick_id = None
+            self.stop()
+            return GLib.SOURCE_REMOVE
+        widget.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _on_draw(self, widget, cr):
+        alloc = widget.get_allocation()
+        _dg_paint(cr, self.source, alloc.width, alloc.height, self.t,
+                  self.s, self.mode, self.rng)
+        return True
+
+    def stop(self):
+        if self.draw_id is None:
+            return
+        for hid in (self.draw_id, self.unmap_id):
+            try:
+                self.widget.disconnect(hid)
+            except Exception:
+                pass
+        self.draw_id = self.unmap_id = None
+        if self.tick_id is not None:
+            try:
+                self.widget.remove_tick_callback(self.tick_id)
+            except Exception:
+                pass
+            self.tick_id = None
+        self.widget.queue_draw()
+        self.on_done()
+
+
 # ─── main plugin ─────────────────────────────────────────────────────────────
 
 class TerminatorStyler(plugin.MenuItem):
@@ -321,6 +722,7 @@ class TerminatorStyler(plugin.MenuItem):
         'enable_scrollbar':      True,
         'enable_titlebar':       True,
         'enable_profileswitcher': True,
+        'enable_degauss':        True,
 
         # WindowStyler.
         'ws_padding': 10,
@@ -358,6 +760,7 @@ class TerminatorStyler(plugin.MenuItem):
         self.enable_scrollbar      = self.DEFAULTS['enable_scrollbar']
         self.enable_titlebar       = self.DEFAULTS['enable_titlebar']
         self.enable_profileswitcher = self.DEFAULTS['enable_profileswitcher']
+        self.enable_degauss        = self.DEFAULTS['enable_degauss']
 
         # WindowStyler state.
         self.ws_padding      = self.DEFAULTS['ws_padding']
@@ -401,6 +804,16 @@ class TerminatorStyler(plugin.MenuItem):
         self.ps_state        = {}    # terminal -> dict
         self.ps_handler_ids  = {}    # terminal -> [(obj, hid)]
 
+        # Degauss state.
+        self.dg               = dict(DG_DEFAULTS)
+        self.dg_sock          = None
+        self.dg_path          = None
+        self.dg_watch         = None
+        self.dg_clients       = {}   # socket -> [request bytes, io watch, timeout]
+        self.dg_running       = {}   # terminal -> DegaussEffect
+        self.dg_sound_lock    = threading.Lock()
+        self.dg_menu_terminal = None
+
         # Shared timers.
         self.scan_timer_id = None
         self.poll_timer_id = None
@@ -417,6 +830,11 @@ class TerminatorStyler(plugin.MenuItem):
             self.mx_indicators = self._build_mx_indicators()
         if self.enable_titlebar:
             TerminatorStyler._install_titlebar_patch(self)
+        if self.enable_degauss:
+            self._dg_listen()
+            self._dg_prepare_sound()
+        # Terminator does not unload plugins on quit; remove the socket.
+        atexit.register(self._dg_unlisten)
 
         self._install_register_hook()
         # Cover terminals that already exist.
@@ -474,6 +892,9 @@ class TerminatorStyler(plugin.MenuItem):
         self._ws_clear_all()
         self._sb_clear_all()
 
+        self._dg_stop_all()
+        self._dg_unlisten()
+
         # Restore register/deregister and the titlebar.update monkey-patch.
         self._uninstall_register_hook()
         TerminatorStyler._uninstall_titlebar_patch(self)
@@ -488,7 +909,8 @@ class TerminatorStyler(plugin.MenuItem):
 
         # Master flags.
         for key in ('enable_window', 'enable_maximise', 'enable_scrollbar',
-                    'enable_titlebar', 'enable_profileswitcher'):
+                    'enable_titlebar', 'enable_profileswitcher',
+                    'enable_degauss'):
             if key in sections:
                 setattr(self, key, _truthy(sections[key]))
 
@@ -538,11 +960,15 @@ class TerminatorStyler(plugin.MenuItem):
         self.tb_rules = self._load_rules(sections, 'tb_rule_', self._rule_tb)
         self.ps_rules = self._load_rules(sections, 'ps_rule_', self._rule_ps)
 
+        self.dg = dg_settings(sections)
+
         dbg('Styler: loaded — window=%s maximise=%s scrollbar=%s '
-            'titlebar=%s(rules=%d) profile_switcher=%s(rules=%d)'
+            'titlebar=%s(rules=%d) profile_switcher=%s(rules=%d) '
+            'degauss=%s(%s)'
             % (self.enable_window, self.enable_maximise, self.enable_scrollbar,
                self.enable_titlebar, len(self.tb_rules),
-               self.enable_profileswitcher, len(self.ps_rules)))
+               self.enable_profileswitcher, len(self.ps_rules),
+               self.enable_degauss, self.dg['effect']))
 
     def _load_rules(self, sections, prefix, parse):
         ordered = []
@@ -601,6 +1027,7 @@ class TerminatorStyler(plugin.MenuItem):
             'enable_scrollbar':      self.enable_scrollbar,
             'enable_titlebar':       self.enable_titlebar,
             'enable_profileswitcher': self.enable_profileswitcher,
+            'enable_degauss':        self.enable_degauss,
             'ws_padding':            self.ws_padding,
             'mx_enable_badge':       self.mx_enable_badge,
             'mx_enable_title':       self.mx_enable_title,
@@ -617,6 +1044,8 @@ class TerminatorStyler(plugin.MenuItem):
         }
         for key, value in flags.items():
             cfg.plugin_set(name, key, value)
+        for key, value in self.dg.items():
+            cfg.plugin_set(name, 'dg_' + key, value)
 
         for i, rule in enumerate(self.tb_rules):
             cfg.plugin_set(name, 'tb_rule_%d' % i, {
@@ -1498,12 +1927,192 @@ class TerminatorStyler(plugin.MenuItem):
             self._sb_tint(terminal, profile)
         return True
 
+    # ── Degauss ──────────────────────────────────────────────────────────────
+
+    def _dg_listen(self):
+        if self.dg_sock is not None:
+            return
+        path = _dg_socket_path()
+        if path is None:
+            err('Styler: XDG_RUNTIME_DIR unset, degauss command disabled')
+            return
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            sock.bind(path)
+            os.chmod(path, 0o600)
+            sock.listen(4)
+            sock.setblocking(False)
+        except OSError as ex:
+            err('Styler: degauss socket %s failed: %s' % (path, ex))
+            sock.close()
+            return
+        self.dg_sock = sock
+        self.dg_path = path
+        self.dg_watch = GLib.io_add_watch(sock.fileno(), GLib.PRIORITY_DEFAULT,
+                                          GLib.IO_IN, self._dg_on_accept)
+        dbg('Styler: degauss listening on %s' % path)
+
+    def _dg_unlisten(self):
+        for conn in list(self.dg_clients):
+            self._dg_drop(conn)
+        if self.dg_watch is not None:
+            GLib.source_remove(self.dg_watch)
+            self.dg_watch = None
+        if self.dg_sock is not None:
+            self.dg_sock.close()
+            self.dg_sock = None
+            try:
+                os.unlink(self.dg_path)
+            except OSError:
+                pass
+
+    def _dg_on_accept(self, _fd, _cond):
+        if self.dg_sock is None:
+            return False
+        try:
+            conn, _addr = self.dg_sock.accept()
+        except OSError:
+            return True
+        conn.setblocking(False)
+        watch = GLib.io_add_watch(conn.fileno(), GLib.PRIORITY_DEFAULT,
+                                  GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
+                                  self._dg_on_readable, conn)
+        timer = GLib.timeout_add_seconds(2, self._dg_on_client_timeout, conn)
+        self.dg_clients[conn] = [b'', watch, timer]
+        return True
+
+    def _dg_on_readable(self, _fd, _cond, conn):
+        entry = self.dg_clients.get(conn)
+        if entry is None:
+            return False
+        try:
+            data = conn.recv(256)
+        except BlockingIOError:
+            return True
+        except OSError as ex:
+            dbg('Styler: degauss client read failed: %s' % ex)
+            data = b''
+        if not data:
+            entry[1] = None
+            self._dg_drop(conn)
+            return False
+        entry[0] += data
+        if b'\n' not in entry[0] and len(entry[0]) < 256:
+            return True
+        GLib.source_remove(entry[2])
+        entry[1] = entry[2] = None
+        self._dg_request(conn, entry[0].decode('ascii', 'replace').strip())
+        return False
+
+    def _dg_on_client_timeout(self, conn):
+        entry = self.dg_clients.get(conn)
+        if entry is not None:
+            entry[2] = None
+            self._dg_drop(conn)
+        return False
+
+    def _dg_drop(self, conn):
+        entry = self.dg_clients.pop(conn, None)
+        if entry is not None:
+            for source in entry[1:]:
+                if source is not None:
+                    GLib.source_remove(source)
+        conn.close()
+
+    def _dg_reply(self, conn, answer):
+        if conn not in self.dg_clients:
+            return
+        try:
+            conn.settimeout(1.0)
+            conn.sendall(answer.encode('ascii') + b'\n')
+        except OSError as ex:
+            dbg('Styler: degauss client left before %r: %s' % (answer, ex))
+        self._dg_drop(conn)
+
+    def _dg_request(self, conn, uuid):
+        terminal = next((t for t in self.terminator.terminals
+                         if t.uuid.urn == uuid), None)
+        if terminal is None:
+            self._dg_reply(conn, 'unknown')
+            return
+        result = self._dg_start(terminal, dict(self.dg),
+                                lambda: self._dg_reply(conn, 'done'))
+        if result != 'started':
+            self._dg_reply(conn, result)
+
+    def _dg_start(self, terminal, settings, on_done=None):
+        """Degauss one pane. Returns 'started', 'busy' or 'unavailable'."""
+        if terminal in self.dg_running:
+            return 'busy'
+        widget = getattr(terminal, 'vte', None)
+        if widget is None:
+            return 'unavailable'
+        if settings['effect'] == 'pattern':
+            source = _dg_bars_surface(widget)
+        else:
+            source = _dg_snapshot(widget)
+        if source is None:
+            return 'unavailable'
+
+        def finished():
+            self.dg_running.pop(terminal, None)
+            if on_done is not None:
+                on_done()
+
+        self.dg_running[terminal] = DegaussEffect(widget, source, settings,
+                                                  finished)
+        if settings['sound'] and settings['volume'] > 0:
+            threading.Thread(target=self._dg_sound_worker,
+                             args=(dict(settings), True), daemon=True).start()
+        return 'started'
+
+    def _dg_stop_all(self):
+        for effect in list(self.dg_running.values()):
+            effect.stop()
+
+    def _dg_prepare_sound(self):
+        if self.dg['sound'] and self.dg['volume'] > 0:
+            threading.Thread(target=self._dg_sound_worker,
+                             args=(dict(self.dg), False), daemon=True).start()
+
+    def _dg_sound_worker(self, settings, play):
+        # Worker thread: never touches GTK.
+        try:
+            with self.dg_sound_lock:
+                path = dg_ensure_wav(settings)
+        except Exception as ex:
+            err('Styler: degauss sound synthesis failed: %s' % ex)
+            return
+        if not play:
+            return
+        player = dg_player(settings['player'])
+        if player is None:
+            dbg('Styler: no audio player found (%s)' % settings['player'])
+            return
+        try:
+            proc = subprocess.Popen([player, path], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        except OSError as ex:
+            err('Styler: cannot run %s: %s' % (player, ex))
+            return
+        proc.wait()
+
     # ── context menu ─────────────────────────────────────────────────────────
 
     def callback(self, menuitems, _menu, terminal):
         # Opportunistically catch any newly-visible window/terminals.
         for t in self.terminator.terminals:
             self._connect_terminal(t)
+
+        self.dg_menu_terminal = terminal
+        if self.enable_degauss:
+            item = Gtk.MenuItem.new_with_mnemonic(_('_Degauss this pane'))
+            item.connect('activate',
+                         lambda _i: self._dg_start(terminal, dict(self.dg)))
+            menuitems.append(item)
 
         item = Gtk.MenuItem.new_with_mnemonic(_('_Styler Preferences…'))
         item.connect('activate', self.configure)
@@ -1546,6 +2155,9 @@ class TerminatorStyler(plugin.MenuItem):
         notebook.append_page(
             self._cfg_profileswitcher_tab(commit_callbacks),
             Gtk.Label(label=_('Profile Switcher')))
+        notebook.append_page(
+            self._cfg_degauss_tab(commit_callbacks),
+            Gtk.Label(label=_('Degauss')))
 
         dialog.vbox.pack_start(notebook, True, True, 6)
         dialog.show_all()
@@ -1563,8 +2175,16 @@ class TerminatorStyler(plugin.MenuItem):
         old_enable_maximise = self.enable_maximise
         old_enable_window = self.enable_window
         old_enable_scrollbar = self.enable_scrollbar
+        old_enable_degauss = self.enable_degauss
         for cb in commit_callbacks:
             cb()
+
+        if old_enable_degauss and not self.enable_degauss:
+            self._dg_stop_all()
+            self._dg_unlisten()
+        elif self.enable_degauss:
+            self._dg_listen()
+            self._dg_prepare_sound()
 
         # Rewire features that flipped on/off.
         if old_enable_window and not self.enable_window:
@@ -1652,6 +2272,8 @@ class TerminatorStyler(plugin.MenuItem):
                                         '(rule-based titlebar coloring)')),
             ('enable_profileswitcher', _('_Profile switcher '
                                         '(auto-switch profile based on foreground command)')),
+            ('enable_degauss',        _('_Degauss '
+                                        '(CRT degauss effect from the menu or the degauss command)')),
         )
         widgets = {}
         for attr, label in toggles:
@@ -2062,6 +2684,163 @@ class TerminatorStyler(plugin.MenuItem):
                 s['last_signature'] = None
         commit.append(_apply)
         return box
+
+    def _cfg_degauss_tab(self, commit):
+        box = Gtk.VBox(spacing=6)
+        box.set_border_width(12)
+        s = self.dg
+
+        def lbl(text):
+            l = Gtk.Label(label=text)
+            l.set_halign(Gtk.Align.END)
+            return l
+
+        def combo(choices, active):
+            c = Gtk.ComboBoxText()
+            for cid, text in choices:
+                c.append(cid, text)
+            c.set_active_id(str(active))
+            return c
+
+        def scale(lo, hi, value):
+            sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, 1)
+            sc.set_value(value)
+            sc.set_value_pos(Gtk.PositionType.RIGHT)
+            sc.set_digits(0)
+            sc.set_hexpand(True)
+            return sc
+
+        def spin(lo, hi, step, value, digits=0):
+            sp = Gtk.SpinButton.new_with_range(lo, hi, step)
+            sp.set_digits(digits)
+            sp.set_value(value)
+            return sp
+
+        def framed(title, rows):
+            frame = Gtk.Frame(label=' %s ' % title)
+            grid = Gtk.Grid()
+            grid.set_row_spacing(6)
+            grid.set_column_spacing(10)
+            grid.set_border_width(8)
+            for i, (label, widget) in enumerate(rows):
+                if label is None:
+                    grid.attach(widget, 0, i, 2, 1)
+                else:
+                    grid.attach(lbl(label), 0, i, 1, 1)
+                    grid.attach(widget, 1, i, 1, 1)
+            frame.add(grid)
+            box.pack_start(frame, False, False, 0)
+            return frame
+
+        effect = combo((('wobble', _('Wobble (shake a snapshot of the pane)')),
+                        ('pattern', _('Test pattern (shake color bars)'))),
+                       s['effect'])
+        duration = spin(DG_RANGES['duration'][0], DG_RANGES['duration'][1],
+                        0.1, s['duration'], digits=1)
+        flash = Gtk.CheckButton.new_with_mnemonic(_('Initial white _flash'))
+        flash.set_active(s['flash'])
+        framed(_('Effect'), ((_('Effect:'), effect),
+                             (_('Duration (s):'), duration),
+                             (None, flash)))
+
+        sound = Gtk.CheckButton.new_with_mnemonic(
+            _('Play _sound (thunk + mains hum)'))
+        sound.set_active(s['sound'])
+        volume = scale(0, 100, s['volume'])
+        mains = combo((('50', _('50 Hz')), ('60', _('60 Hz'))), s['mains_hz'])
+        player = combo([(p, p) for p in DG_CHOICES['player']], s['player'])
+        framed(_('Sound'), ((None, sound),
+                            (_('Volume (%):'), volume),
+                            (_('Mains hum:'), mains),
+                            (_('Player:'), player)))
+
+        strength = scale(DG_RANGES['wobble_strength'][0],
+                         DG_RANGES['wobble_strength'][1], s['wobble_strength'])
+        strip = spin(DG_RANGES['strip_px'][0], DG_RANGES['strip_px'][1], 1,
+                     s['strip_px'])
+        framed(_('Wobble'), ((_('Shake strength (%):'), strength),
+                             (_('Strip height (px):'), strip)))
+
+        blotches = Gtk.CheckButton.new_with_mnemonic(
+            _('_Rainbow blotches over the pane (Wobble effect)'))
+        blotches.set_active(s['blotches'])
+        b_count = spin(DG_RANGES['blotches_count'][0],
+                       DG_RANGES['blotches_count'][1], 1, s['blotches_count'])
+        b_strength = scale(0, 100, s['blotches_strength'])
+        b_frame = framed(_('Rainbow blotches'), ((None, blotches),
+                                                 (_('Blotches:'), b_count),
+                                                 (_('Strength (%):'), b_strength)))
+
+        p_rainbow = scale(0, 100, s['pattern_rainbow'])
+        p_fps = spin(DG_RANGES['pattern_fps'][0], DG_RANGES['pattern_fps'][1],
+                     1, s['pattern_fps'])
+        framed(_('Test pattern'), ((_('Rainbow swirl (%):'), p_rainbow),
+                                   (_('Frames per second:'), p_fps)))
+
+        def read():
+            return {
+                'effect':            effect.get_active_id(),
+                'duration':          round(duration.get_value(), 1),
+                'flash':             flash.get_active(),
+                'sound':             sound.get_active(),
+                'volume':            int(volume.get_value()),
+                'mains_hz':          int(mains.get_active_id()),
+                'player':            player.get_active_id(),
+                'wobble_strength':   int(strength.get_value()),
+                'strip_px':          int(strip.get_value()),
+                'blotches':          blotches.get_active(),
+                'blotches_count':    int(b_count.get_value()),
+                'blotches_strength': int(b_strength.get_value()),
+                'pattern_rainbow':   int(p_rainbow.get_value()),
+                'pattern_fps':       int(p_fps.get_value()),
+            }
+
+        def sync(*_args):
+            on = sound.get_active()
+            for w in (volume, mains, player):
+                w.set_sensitive(on)
+            b_frame.set_sensitive(effect.get_active_id() == 'wobble')
+            for w in (b_count, b_strength):
+                w.set_sensitive(blotches.get_active())
+
+        for w in (effect, sound, blotches):
+            w.connect('changed' if w is effect else 'toggled', sync)
+        sync()
+
+        test_row = Gtk.HBox(spacing=8)
+        test_btn = Gtk.Button.new_with_mnemonic(_('_Test on this pane'))
+        target = self.dg_menu_terminal
+        if target is None or target not in self.terminator.terminals:
+            test_btn.set_sensitive(False)
+            target = None
+        test_btn.connect('clicked',
+                         lambda _b: self._dg_start(target, read()))
+        test_row.pack_start(test_btn, False, False, 0)
+        box.pack_start(test_row, False, False, 4)
+
+        hint = Gtk.Label()
+        hint.set_markup(_(
+            '<small>'
+            'Run <tt>degauss</tt> in a pane, or use <b>Degauss this pane</b> '
+            'in the context menu. <b>Test</b> uses the values shown here '
+            'before you press OK.\n'
+            'Shake strength applies to both effects. Outside Terminator, '
+            '<tt>degauss</tt> reads these settings from Terminator\'s config '
+            'file and always draws the Test pattern with terminal colors; '
+            '<b>Frames per second</b> only applies there.'
+            '</small>'))
+        hint.set_line_wrap(True)
+        hint.set_xalign(0)
+        box.pack_start(hint, False, False, 6)
+
+        def _apply():
+            self.dg = read()
+        commit.append(_apply)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.add(box)
+        return scroll
 
     # ── tree-view helpers (shared) ──────────────────────────────────────────
 
