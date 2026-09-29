@@ -153,6 +153,25 @@ How `degauss` behaves:
   file. **Frames per second** only applies there.
 - With Degauss switched off on the General tab, it does nothing.
 
+#### Fire on typos
+
+List your usual typos under **Fire on these commands** (pre-filled with
+`systemclt`) and add this line to `~/.bashrc`:
+
+```bash
+eval "$(degauss --shell-init)"
+```
+
+It installs a bash `command_not_found_handle`: typing one of those
+exact names degausses the terminal silently, like a shell function
+would. Only names that are not real commands can fire, the list is read
+at the moment of the typo (edits apply to open shells immediately),
+and nothing is added to tab completion. Other typos, and listed ones in
+a pipe or without a terminal, get the usual *command not found*. An
+existing handler, such as Debian's `command-not-found`, keeps handling
+everything else. It only runs in local interactive bash: scripts and
+remote shells never load it.
+
 The sound is synthesized once per sound setting and cached in
 `~/.cache/degauss/`. Playback uses `pw-play`, `paplay` or `aplay`,
 whichever is found first unless one is picked.
@@ -235,6 +254,7 @@ normally edited from the Preferences dialog:
     dg_blotches_strength = 100  # %, 0-100
     dg_pattern_rainbow = 100    # %, 0-100
     dg_pattern_fps = 30         # 10-60, terminal fallback only
+    dg_triggers = systemclt     # space-separated command names
     [[[tb_rule_0]]]
       name = root
       pattern = root@
