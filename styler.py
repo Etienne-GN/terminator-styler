@@ -90,7 +90,9 @@ def _rgb_floats_to_hex(r, g, b):
     return '#' + ch(r) + ch(g) + ch(b)
 
 
-def _truthy(v):
+def _truthy(v, default=False):
+    if v is None:
+        return default
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
