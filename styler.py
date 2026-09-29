@@ -1206,11 +1206,21 @@ class TerminatorStyler(plugin.MenuItem):
             except re.error as exc:
                 err('Styler: bad regex %r — %s' % (pattern, exc))
         if match is None and self.tb_follow_profile:
-            color = self._terminal_profile_color(terminal, prefer='bg')
-            fg    = self._terminal_profile_color(terminal, prefer='fg')
-            if color or fg:
-                match = (color or '', fg or '')
+            match = self._tb_profile_override(terminal)
         self.tb_override[terminal] = match
+
+    def _tb_profile_override(self, terminal):
+        # Each color is taken as-is: filling a missing bg from fg (or the
+        # reverse) would paint the label in its own background color.
+        try:
+            cfg = terminal.config
+            bg = (cfg['background_color'] or '').strip()
+            fg = (cfg['foreground_color'] or '').strip()
+        except Exception:
+            return None
+        if not bg and not fg:
+            return None
+        return (bg, fg)
 
     def _tb_dispatch_update(self, terminal):
         if self.tb_target_titlebar:
