@@ -15,8 +15,8 @@
 #
 # Configure via right-click menu: Styler -> Preferences (one dialog with one
 # tab per feature). On first load, settings from the old plugins
-# (TitlebarChanger, ProfileSwitcher, WindowStyler, MaximiseAware) are migrated
-# automatically.
+# (TitlebarChanger or its predecessor TitleReact, ProfileSwitcher,
+# WindowStyler, MaximiseAware) are migrated automatically.
 
 import os
 import re
@@ -648,12 +648,21 @@ class TerminatorStyler(plugin.MenuItem):
         migrated = False
 
         tb = cfg.plugin_get_config('TitlebarChanger')
+        if not (isinstance(tb, dict) and tb):
+            # TitlebarChanger's own predecessor.
+            tb = cfg.plugin_get_config('TitleReact')
         if isinstance(tb, dict) and tb:
             migrated = True
             for k in ('target_titlebar', 'target_window',
                       'window_follow_focus', 'follow_profile'):
                 if k in tb:
                     sections['tb_' + k] = tb[k]
+            if ('target_titlebar' not in tb and 'target_window' not in tb
+                    and 'target' in tb):
+                # Single-target schema: target = titlebar | window.
+                on_titlebar = str(tb['target']) == 'titlebar'
+                sections['tb_target_titlebar'] = on_titlebar
+                sections['tb_target_window'] = not on_titlebar
             i = 0
             for key, item in tb.items():
                 if isinstance(item, dict) and 'pattern' in item:
