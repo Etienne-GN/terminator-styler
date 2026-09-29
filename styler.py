@@ -2789,8 +2789,10 @@ class TerminatorStyler(plugin.MenuItem):
             '<small>Typing one of these exact command names in a local bash '
             'degausses the terminal instead of printing '
             '<i>command not found</i>. Only names that are not real commands '
-            'fire. Needs this line in <tt>~/.bashrc</tt>:\n'
-            '<tt>eval "$(degauss --shell-init)"</tt></small>'))
+            'fire. Needs this line in <tt>~/.bash_aliases</tt> or '
+            '<tt>~/.bashrc</tt> (the hook file is written by '
+            '<tt>install.sh</tt>):\n'
+            '<tt>. ~/.local/share/degauss/hook.bash</tt></small>'))
         t_hint.set_line_wrap(True)
         t_hint.set_xalign(0)
         t_hint.set_selectable(True)
