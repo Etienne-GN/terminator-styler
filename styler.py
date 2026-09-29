@@ -2754,51 +2754,6 @@ class TerminatorStyler(plugin.MenuItem):
             box.pack_start(frame, False, False, 0)
             return frame
 
-        effect = combo((('wobble', _('Wobble (shake a snapshot of the pane)')),
-                        ('pattern', _('Test pattern (shake color bars)'))),
-                       s['effect'])
-        duration = spin(DG_RANGES['duration'][0], DG_RANGES['duration'][1],
-                        0.1, s['duration'], digits=1)
-        flash = Gtk.CheckButton.new_with_mnemonic(_('Initial white _flash'))
-        flash.set_active(s['flash'])
-        framed(_('Effect'), ((_('Effect:'), effect),
-                             (_('Duration (s):'), duration),
-                             (None, flash)))
-
-        sound = Gtk.CheckButton.new_with_mnemonic(
-            _('Play _sound (thunk + mains hum)'))
-        sound.set_active(s['sound'])
-        volume = scale(0, 100, s['volume'])
-        mains = combo((('50', _('50 Hz')), ('60', _('60 Hz'))), s['mains_hz'])
-        player = combo([(p, p) for p in DG_CHOICES['player']], s['player'])
-        framed(_('Sound'), ((None, sound),
-                            (_('Volume (%):'), volume),
-                            (_('Mains hum:'), mains),
-                            (_('Player:'), player)))
-
-        strength = scale(DG_RANGES['wobble_strength'][0],
-                         DG_RANGES['wobble_strength'][1], s['wobble_strength'])
-        strip = spin(DG_RANGES['strip_px'][0], DG_RANGES['strip_px'][1], 1,
-                     s['strip_px'])
-        framed(_('Wobble'), ((_('Shake strength (%):'), strength),
-                             (_('Strip height (px):'), strip)))
-
-        blotches = Gtk.CheckButton.new_with_mnemonic(
-            _('_Rainbow blotches over the pane (Wobble effect)'))
-        blotches.set_active(s['blotches'])
-        b_count = spin(DG_RANGES['blotches_count'][0],
-                       DG_RANGES['blotches_count'][1], 1, s['blotches_count'])
-        b_strength = scale(0, 100, s['blotches_strength'])
-        b_frame = framed(_('Rainbow blotches'), ((None, blotches),
-                                                 (_('Blotches:'), b_count),
-                                                 (_('Strength (%):'), b_strength)))
-
-        p_rainbow = scale(0, 100, s['pattern_rainbow'])
-        p_fps = spin(DG_RANGES['pattern_fps'][0], DG_RANGES['pattern_fps'][1],
-                     1, s['pattern_fps'])
-        framed(_('Test pattern'), ((_('Rainbow swirl (%):'), p_rainbow),
-                                   (_('Frames per second:'), p_fps)))
-
         triggers = Gtk.ListStore(str)
         for name in s['triggers']:
             triggers.append([name])
@@ -2848,6 +2803,51 @@ class TerminatorStyler(plugin.MenuItem):
                 names.append(triggers.get_value(it, 0) or '')
                 it = triggers.iter_next(it)
             return dg_parse_triggers(' '.join(names))
+
+        effect = combo((('wobble', _('Wobble (shake a snapshot of the pane)')),
+                        ('pattern', _('Test pattern (shake color bars)'))),
+                       s['effect'])
+        duration = spin(DG_RANGES['duration'][0], DG_RANGES['duration'][1],
+                        0.1, s['duration'], digits=1)
+        flash = Gtk.CheckButton.new_with_mnemonic(_('Initial white _flash'))
+        flash.set_active(s['flash'])
+        framed(_('Effect'), ((_('Effect:'), effect),
+                             (_('Duration (s):'), duration),
+                             (None, flash)))
+
+        sound = Gtk.CheckButton.new_with_mnemonic(
+            _('Play _sound (thunk + mains hum)'))
+        sound.set_active(s['sound'])
+        volume = scale(0, 100, s['volume'])
+        mains = combo((('50', _('50 Hz')), ('60', _('60 Hz'))), s['mains_hz'])
+        player = combo([(p, p) for p in DG_CHOICES['player']], s['player'])
+        framed(_('Sound'), ((None, sound),
+                            (_('Volume (%):'), volume),
+                            (_('Mains hum:'), mains),
+                            (_('Player:'), player)))
+
+        strength = scale(DG_RANGES['wobble_strength'][0],
+                         DG_RANGES['wobble_strength'][1], s['wobble_strength'])
+        strip = spin(DG_RANGES['strip_px'][0], DG_RANGES['strip_px'][1], 1,
+                     s['strip_px'])
+        framed(_('Wobble'), ((_('Shake strength (%):'), strength),
+                             (_('Strip height (px):'), strip)))
+
+        blotches = Gtk.CheckButton.new_with_mnemonic(
+            _('_Rainbow blotches over the pane (Wobble effect)'))
+        blotches.set_active(s['blotches'])
+        b_count = spin(DG_RANGES['blotches_count'][0],
+                       DG_RANGES['blotches_count'][1], 1, s['blotches_count'])
+        b_strength = scale(0, 100, s['blotches_strength'])
+        b_frame = framed(_('Rainbow blotches'), ((None, blotches),
+                                                 (_('Blotches:'), b_count),
+                                                 (_('Strength (%):'), b_strength)))
+
+        p_rainbow = scale(0, 100, s['pattern_rainbow'])
+        p_fps = spin(DG_RANGES['pattern_fps'][0], DG_RANGES['pattern_fps'][1],
+                     1, s['pattern_fps'])
+        framed(_('Test pattern'), ((_('Rainbow swirl (%):'), p_rainbow),
+                                   (_('Frames per second:'), p_fps)))
 
         def read():
             return {
