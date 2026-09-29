@@ -474,31 +474,8 @@ class TerminatorStyler(plugin.MenuItem):
         # Restore window/VTE styling.
         self._tb_clear_all_window_css()
         self._tb_clear_all_titlebar_css()
-        for p in list(self.ws_providers.values()):
-            try:
-                p.load_from_data(b'')
-            except Exception:
-                pass
-        for terminal in list(self.terminator.terminals):
-            self._ws_set_vte_margin(terminal, 0)
-
-        # Remove scrollbar providers.
-        for terminal, provider in list(self.sb_providers.items()):
-            sb = getattr(terminal, 'scrollbar', None)
-            screen = None
-            if sb is not None:
-                try:
-                    screen = sb.get_screen()
-                except Exception:
-                    screen = None
-            if screen is None:
-                screen = Gdk.Screen.get_default()
-            try:
-                Gtk.StyleContext.remove_provider_for_screen(screen, provider)
-            except Exception:
-                pass
-        self.sb_providers.clear()
-        self.sb_last.clear()
+        self._ws_clear_all()
+        self._sb_clear_all()
 
         # Restore register/deregister and the titlebar.update monkey-patch.
         self._uninstall_register_hook()
@@ -912,6 +889,15 @@ class TerminatorStyler(plugin.MenuItem):
         vte.set_margin_start(value)
         vte.set_margin_end(value)
 
+    def _ws_clear_all(self):
+        for provider in self.ws_providers.values():
+            try:
+                provider.load_from_data(b'')
+            except Exception:
+                pass
+        for terminal in list(self.terminator.terminals):
+            self._ws_set_vte_margin(terminal, 0)
+
     def _ws_apply_all(self):
         seen = set()
         for terminal in self.terminator.terminals:
@@ -1046,6 +1032,30 @@ class TerminatorStyler(plugin.MenuItem):
             scrollbar.queue_draw()
         except Exception:
             pass
+
+    def _sb_clear_all(self):
+        for terminal, provider in list(self.sb_providers.items()):
+            sb = getattr(terminal, 'scrollbar', None)
+            screen = None
+            if sb is not None:
+                try:
+                    screen = sb.get_screen()
+                except Exception:
+                    screen = None
+            if screen is None:
+                screen = Gdk.Screen.get_default()
+            try:
+                Gtk.StyleContext.remove_provider_for_screen(screen, provider)
+            except Exception:
+                pass
+            if sb is not None:
+                try:
+                    sb.reset_style()
+                    sb.queue_draw()
+                except Exception:
+                    pass
+        self.sb_providers.clear()
+        self.sb_last.clear()
 
     def _terminal_profile_color(self, terminal, prefer='bg'):
         try:
@@ -1537,10 +1547,16 @@ class TerminatorStyler(plugin.MenuItem):
     def _apply_preferences(self, commit_callbacks):
         old_enable_titlebar = self.enable_titlebar
         old_enable_maximise = self.enable_maximise
+        old_enable_window = self.enable_window
+        old_enable_scrollbar = self.enable_scrollbar
         for cb in commit_callbacks:
             cb()
 
         # Rewire features that flipped on/off.
+        if old_enable_window and not self.enable_window:
+            self._ws_clear_all()
+        if old_enable_scrollbar and not self.enable_scrollbar:
+            self._sb_clear_all()
         if old_enable_titlebar and not self.enable_titlebar:
             self._tb_clear_all_window_css()
             self._tb_clear_all_titlebar_css()
