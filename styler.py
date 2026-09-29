@@ -199,6 +199,8 @@ class BadgeIndicator(object):
             return
         label = terminal.titlebar.label
         text = label.get_text()
+        # A manually renamed titlebar (EditableLabel._custom) ignores set_text,
+        # so the badge is skipped there; the title and border cues still show.
         # Strip any pre-existing trailing markers, then append exactly one.
         # Terminator can re-set the label between our updates, leading to
         # repeated appends if we only check endswith().
@@ -1694,6 +1696,8 @@ class TerminatorStyler(plugin.MenuItem):
         p_spin = Gtk.SpinButton.new_with_range(0, 60, 1)
         p_spin.set_value(self.ws_padding)
         p_spin.set_hexpand(True)
+        p_spin.set_tooltip_text(
+            _('Whitespace added inside every terminal pane on all four sides.'))
         grid.attach(p_spin, 1, 0, 1, 1)
 
         box.pack_start(grid, False, False, 0)
@@ -1702,9 +1706,11 @@ class TerminatorStyler(plugin.MenuItem):
         hint.set_markup(_(
             '<small>'
             '<b>Internal padding</b> is whitespace inside each terminal pane '
-            'on all four sides.\n'
+            'on all four sides, applied immediately to every pane including '
+            'ones opened later.\n'
             '<b>Rounded corners</b> are applied to the window (12 px); '
-            'a compositor is required for the cut corners to be transparent.'
+            'a compositor is required for the cut corners to be transparent. '
+            'Some compositors draw their own rounding and override this.'
             '</small>'))
         hint.set_line_wrap(True)
         hint.set_xalign(0)
@@ -1930,6 +1936,21 @@ class TerminatorStyler(plugin.MenuItem):
         rules_frame.add(hbox)
         box.pack_start(rules_frame, True, True, 6)
 
+        hint = Gtk.Label()
+        hint.set_markup(_(
+            '<small>'
+            'Regex matched against the VTE window title (set by your shell '
+            'prompt). First matching rule wins.\n'
+            'Rules always have priority — when <b>follows active profile</b> '
+            'is on, the profile color is used only when no rule matches.\n'
+            '<b>Per-pane titlebar</b> and <b>window title bar</b> targets are '
+            'independent and can be enabled together. The window target '
+            'needs client-side decorations (CSD).'
+            '</small>'))
+        hint.set_line_wrap(True)
+        hint.set_xalign(0)
+        box.pack_start(hint, False, False, 4)
+
         def _apply():
             new_titlebar     = cb_titlebar.get_active()
             new_window       = cb_window.get_active()
@@ -2027,7 +2048,11 @@ class TerminatorStyler(plugin.MenuItem):
             '<b>Command</b> matches <tt>/proc/&lt;pid&gt;/comm</tt> exactly '
             '(truncated at 15 chars).\n'
             '<b>Argument</b> is a case-insensitive glob against the joined '
-            'argv (excluding the command).'
+            'argv (excluding the command). Empty matches any invocation.\n'
+            '<b>Profile</b> must exist in Preferences → Profiles.\n'
+            'Examples: <tt>ssh</tt> + <tt>*staging*</tt>, '
+            '<tt>ssh</tt> + <tt>*prod*</tt>, '
+            '<tt>python3</tt> + <i>(empty)</i>.'
             '</small>'))
         hint.set_line_wrap(True)
         hint.set_xalign(0)
