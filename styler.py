@@ -1619,7 +1619,8 @@ class TerminatorStyler(plugin.MenuItem):
                 self._tb_update_window(window)
         return False
 
-    def _tb_on_focus_out(self, _terminal, _event, _data):
+    def _tb_on_focus_out(self, _terminal, _data=None):
+        # Terminal's own 'focus-out' signal carries no event argument.
         GObject.idle_add(self._initial_sweep)
         return False
 
@@ -1826,7 +1827,7 @@ class TerminatorStyler(plugin.MenuItem):
         except Exception as ex:
             err('Styler: failed to wire ps terminal: %s' % ex)
 
-    def _ps_on_focus_out_delayed(self, _terminal, _event, _arg=None):
+    def _ps_on_focus_out_delayed(self, _terminal, _data=None):
         GObject.idle_add(self._initial_sweep)
         return False
 
