@@ -156,11 +156,16 @@ How `degauss` behaves:
 #### Fire on typos
 
 List your usual typos under **Fire on these commands** (pre-filled with
-`systemclt`) and add this line to `~/.bashrc`:
+`systemclt`) and add this line to `~/.bash_aliases` (sourced by Debian's
+default `~/.bashrc`) or to `~/.bashrc`:
 
 ```bash
-eval "$(degauss --shell-init)"
+. ~/.local/share/degauss/hook.bash
 ```
+
+`install.sh` writes that file from `degauss --shell-init`; re-run it
+after updating the repo to refresh the hook. The typo list itself is
+not in the file, so Preferences edits never need a reinstall.
 
 It installs a bash `command_not_found_handle`: typing one of those
 exact names degausses the terminal silently, like a shell function
@@ -190,9 +195,10 @@ whichever is found first unless one is picked.
 bash install.sh
 ```
 
-This installs the plugin into `~/.config/terminator/plugins/` and the
-command as `~/.local/bin/degauss`, backing up any different existing
-copy. Then restart Terminator and enable **TerminatorStyler** in
+This installs the plugin into `~/.config/terminator/plugins/`, the
+command as `~/.local/bin/degauss` and the typo hook as
+`~/.local/share/degauss/hook.bash`, backing up any different existing
+copy of the first two. Then restart Terminator and enable **TerminatorStyler** in
 *Preferences → Plugins*. If you previously had any of the old plugins
 installed (including the standalone **Degauss**), disable them in the
 same dialog and remove their files from `~/.config/terminator/plugins/`;
