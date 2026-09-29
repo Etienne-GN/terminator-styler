@@ -1,14 +1,15 @@
 # Terminator Styler
 
-A single Terminator plugin that bundles five appearance / behavior tweaks
-under one context menu entry and one Preferences dialog.
+A single Terminator plugin that bundles six appearance / behavior tweaks
+under one Preferences dialog, plus a `degauss` command.
 
-It replaces four previously standalone plugins:
+It replaces these previously standalone plugins:
 
 - `terminator-titlebar-changer`
 - `terminator-profile-changer`
 - `terminator-window-styler`
 - `terminator-maximise-aware`
+- the `degauss` experiment (`degauss_plugin.py` + `degauss`)
 
 ## Features
 
@@ -120,11 +121,49 @@ Examples:
 | top     | (empty)   | dark        |
 | python3 | (empty)   | solarized   |
 
+### Degauss
+
+Degauss a pane like a 90s CRT monitor: a white flash, the picture
+shaking and settling, optionally with the thunk and mains hum of the
+degauss coil. Trigger it with **Degauss this pane** in the context menu,
+or run `degauss` in the pane (handy at the end of a script or in an
+alias).
+
+Two effects, picked on the **Degauss** tab:
+
+- **Wobble** — the pane's own content shakes in horizontal strips.
+  Optional **Rainbow blotches** orbit over it, like a magnetized tube.
+- **Test pattern** — color bars shake instead, with a **rainbow swirl**.
+
+Every parameter is on the tab: duration, initial flash, shake strength,
+strip height, blotch count and strength, swirl amount, and the sound
+(off by default; volume, 50/60 Hz hum, player). **Test on this pane**
+previews the values in the dialog before you press OK.
+
+How `degauss` behaves:
+
+- Inside Terminator it asks the plugin, through
+  `$XDG_RUNTIME_DIR/terminator-styler-degauss-<pid>.sock`, to animate
+  the pane it runs in (found through `$TERMINATOR_UUID`). The plugin
+  draws the effect and plays the sound; the command returns when the
+  effect is over.
+- Anywhere else (another terminal emulator, an SSH session, plugin not
+  loaded) it plays the sound itself and draws the Test pattern with
+  terminal colors, using the same settings read from Terminator's config
+  file. **Frames per second** only applies there.
+- With Degauss switched off on the General tab, it does nothing.
+
+The sound is synthesized once per sound setting and cached in
+`~/.cache/degauss/`. Playback uses `pw-play`, `paplay` or `aplay`,
+whichever is found first unless one is picked.
+
 ## Requirements
 
 - Terminator (developed against 2.1.x)
 - Python 3 with PyGObject (both come with Terminator)
 - Linux: the profile switcher reads `/proc`
+- For Degauss: pycairo (a Terminator dependency) and, for sound, one of
+  `pw-play`, `paplay` or `aplay`
 
 ## Install
 
@@ -132,10 +171,13 @@ Examples:
 bash install.sh
 ```
 
-Then restart Terminator and enable **TerminatorStyler** in
-*Preferences → Plugins*. If you previously had any of the four old
-plugins installed, disable them in the same dialog and remove their
-files from `~/.config/terminator/plugins/`.
+This installs the plugin into `~/.config/terminator/plugins/` and the
+command as `~/.local/bin/degauss`, backing up any different existing
+copy. Then restart Terminator and enable **TerminatorStyler** in
+*Preferences → Plugins*. If you previously had any of the old plugins
+installed (including the standalone **Degauss**), disable them in the
+same dialog and remove their files from `~/.config/terminator/plugins/`;
+the installer lists the ones it finds.
 
 ## Migration from the old plugins
 
@@ -178,6 +220,21 @@ normally edited from the Preferences dialog:
     tb_target_window = True
     tb_window_follow_focus = False
     tb_follow_profile = False
+    enable_degauss = True
+    dg_effect = wobble          # wobble | pattern
+    dg_duration = 1.9           # seconds, 0.5-5
+    dg_flash = True
+    dg_sound = False
+    dg_volume = 30              # %, 0-100
+    dg_mains_hz = 60            # 50 | 60
+    dg_player = auto            # auto | pw-play | paplay | aplay
+    dg_wobble_strength = 100    # %, 0-200
+    dg_strip_px = 2             # 1-8
+    dg_blotches = False
+    dg_blotches_count = 3       # 1-8
+    dg_blotches_strength = 100  # %, 0-100
+    dg_pattern_rainbow = 100    # %, 0-100
+    dg_pattern_fps = 30         # 10-60, terminal fallback only
     [[[tb_rule_0]]]
       name = root
       pattern = root@
@@ -204,7 +261,7 @@ Then disable **TerminatorStyler** in *Preferences → Plugins* and restart.
 
 - Plugins are only scanned at Terminator startup. Any install / enable
   change requires a restart.
-- All five features can be enabled together; they share one signal
+- All six features can be enabled together; they share one signal
   hub and do not race on `focus-in` / `title-change` / `maximise`.
 
 ## Tests
