@@ -597,6 +597,9 @@ class TerminatorStyler(plugin.MenuItem):
         }
 
     def _rule_ps(self, item):
+        if not item.get('profile'):
+            err('Styler: skipping profile rule without a profile: %r' % item)
+            return None
         command = item.get('command')
         argument = item.get('argument', '')
         if command is None and 'pattern' in item:
@@ -604,6 +607,8 @@ class TerminatorStyler(plugin.MenuItem):
             if item.get('type', 'host') == 'command':
                 command = item['pattern']
             else:
+                err('Styler: skipping legacy host rule %r '
+                    '(re-add as ssh + glob argument)' % item.get('pattern'))
                 return None
         if not command:
             return None
