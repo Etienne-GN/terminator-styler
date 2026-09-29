@@ -1001,7 +1001,10 @@ class TerminatorStyler(plugin.MenuItem):
             err('Styler: cannot read colors for %r: %s' % (profile, ex))
             return
         if not bg:
+            dbg('Styler: sb tint skipped, profile %r has no background_color'
+                % profile)
             return
+        dbg('Styler: tinting scrollbar profile=%s bg=%s' % (profile, bg))
         css_class = 'styler-sb-%d' % id(terminal)
         ctx = scrollbar.get_style_context()
         if not ctx.has_class(css_class):
@@ -1496,6 +1499,7 @@ class TerminatorStyler(plugin.MenuItem):
             if self.enable_scrollbar:
                 self._sb_tint(terminal, profile)
             return True
+        dbg('Styler: switching terminal to profile %s' % profile)
         try:
             terminal.force_set_profile(None, profile)
         except Exception as ex:
