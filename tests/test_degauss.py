@@ -2,6 +2,8 @@ import importlib.machinery
 import importlib.util
 import os
 import random
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -42,8 +44,18 @@ def test_settings_defaults_when_empty():
 
 
 def test_settings_round_trip_through_strings():
-    raw = {'dg_' + k: str(v) for k, v in cli.DG_DEFAULTS.items()}
+    raw = {'dg_' + k: str(cli.dg_config_value(v))
+           for k, v in cli.DG_DEFAULTS.items()}
     assert cli.dg_settings(raw) == cli.DG_DEFAULTS
+
+
+def test_triggers_parsing():
+    assert cli.dg_parse_triggers('  systemclt  sytemctl systemclt ') == (
+        'systemclt', 'sytemctl')
+    assert cli.dg_settings({'dg_triggers': ''})['triggers'] == ()
+    assert cli.dg_settings({'dg_triggers': ['gti', 'sl']})['triggers'] == (
+        'gti', 'sl')
+    assert cli.dg_config_value(('gti', 'sl')) == 'gti sl'
 
 
 def test_settings_parse_and_clamp():
@@ -148,3 +160,103 @@ def test_frame_settles_on_plain_bars():
 def test_ask_terminator_outside_terminator(monkeypatch):
     monkeypatch.delenv('TERMINATOR_UUID', raising=False)
     assert cli.ask_terminator(1) is None
+
+
+def write_config(home, body):
+    (home / 'terminator').mkdir(exist_ok=True)
+    (home / 'terminator' / 'config').write_text(
+        '[plugins]\n  [[TerminatorStyler]]\n' + body, encoding='utf-8')
+
+
+def cli_env(tmp_path):
+    env = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path),
+               XDG_CACHE_HOME=str(tmp_path / 'cache'))
+    env.pop('TERMINATOR_UUID', None)
+    return env
+
+
+@pytest.mark.parametrize('body,name,expected', [
+    ('    dg_triggers = systemclt gti\n', 'gti', 0),
+    ('    dg_triggers = systemclt gti\n', 'git', 1),
+    ('    dg_triggers = ""\n', 'systemclt', 1),
+    ('    enable_degauss = False\n', 'systemclt', 1),
+    ('', 'systemclt', 0),
+])
+def test_is_trigger(tmp_path, body, name, expected):
+    write_config(tmp_path, body)
+    rc = subprocess.call([sys.executable, os.path.join(ROOT, 'degauss.py'),
+                          '--is-trigger', name], env=cli_env(tmp_path))
+    assert rc == expected
+
+
+needs_script = pytest.mark.skipif(shutil.which('script') is None,
+                                  reason='util-linux script(1) not available')
+
+
+HOOK = 'eval "$(%s --shell-init)"' % os.path.join(ROOT, 'degauss.py')
+
+
+def run_bash(tmp_path, commands, hook=True):
+    """Run commands in bash on a pseudo-terminal, after loading the hook
+    unless the commands do it themselves."""
+    write_config(tmp_path, '    dg_triggers = systemclt\n'
+                           '    dg_duration = 0.5\n')
+    script = tmp_path / 'session.sh'
+    script.write_text('%s\n%s\n' % (HOOK if hook else '', commands),
+                      encoding='utf-8')
+    log = tmp_path / 'typescript'
+    subprocess.run(['script', '-qec', 'bash --norc --noprofile %s' % script,
+                    str(log)], env=cli_env(tmp_path), stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, timeout=30, check=True)
+    return log.read_text(encoding='utf-8', errors='replace')
+
+
+@needs_script
+def test_hook_degausses_listed_typo_silently(tmp_path):
+    out = run_bash(tmp_path, 'systemclt; echo "rc=$?"')
+    assert '\x1b[?1049h' in out
+    assert 'rc=0' in out
+    assert 'command not found' not in out
+
+
+@needs_script
+def test_hook_leaves_other_typos_alone(tmp_path):
+    out = run_bash(tmp_path, 'nosuchcmdxyz; echo "rc=$?"')
+    assert 'nosuchcmdxyz: command not found' in out
+    assert 'rc=127' in out
+    assert '\x1b[?1049h' not in out
+
+
+@needs_script
+def test_hook_ignores_listed_typo_in_a_pipe(tmp_path):
+    out = run_bash(tmp_path, 'systemclt | cat; echo "rc=${PIPESTATUS[0]}"')
+    assert 'systemclt: command not found' in out
+    assert 'rc=127' in out
+
+
+@needs_script
+def test_hook_chains_existing_handler_and_survives_reload(tmp_path):
+    out = run_bash(tmp_path, '\n'.join((
+        'command_not_found_handle() { echo "prev:$1"; return 42; }',
+        HOOK,
+        HOOK,
+        'nosuchcmdxyz; echo "rc=$?"',
+        'systemclt; echo "rc2=$?"')), hook=False)
+    assert 'prev:nosuchcmdxyz' in out and 'rc=42' in out
+    assert out.count('prev:') == 1
+    assert 'rc2=0' in out and '\x1b[?1049h' in out
+
+
+@needs_script
+def test_hook_adds_nothing_to_completion(tmp_path):
+    out = run_bash(tmp_path, 'compgen -c systemcl; echo end')
+    assert 'systemclt' not in out
+
+
+@needs_script
+def test_hook_rechains_handler_defined_after_it(tmp_path):
+    out = run_bash(tmp_path, '\n'.join((
+        'command_not_found_handle() { echo "late:$1"; return 42; }',
+        HOOK,
+        'nosuchcmdxyz; echo "rc=$?"')))
+    assert 'late:nosuchcmdxyz' in out and 'rc=42' in out
