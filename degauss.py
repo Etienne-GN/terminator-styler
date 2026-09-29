@@ -5,12 +5,20 @@ Inside Terminator with the TerminatorStyler plugin loaded, the plugin
 animates the pane and plays the sound. Anywhere else, this script plays
 the sound and draws the Test pattern with ANSI truecolor cells. Settings
 come from the [[TerminatorStyler]] block of Terminator's config file.
+
+  degauss                  degauss this terminal
+  degauss --shell-init     print a bash command_not_found_handle that
+                           degausses on the configured trigger commands;
+                           use as: eval "$(degauss --shell-init)"
+  degauss --is-trigger CMD exit 0 if CMD is a configured trigger
 """
 
+import argparse
 import glob
 import math
 import os
 import random
+import shlex
 import shutil
 import socket
 import subprocess
@@ -40,6 +48,7 @@ DG_DEFAULTS = {
     'blotches_strength': 100,
     'pattern_rainbow':   100,
     'pattern_fps':       30,
+    'triggers':          ('systemclt',),
 }
 
 DG_CHOICES = {
@@ -77,8 +86,12 @@ def dg_settings(raw):
         value = raw.get('dg_' + key)
         if value is None:
             continue
+        if isinstance(value, (list, tuple)):
+            value = ' '.join(str(v) for v in value)
         text = str(value).strip()
-        if isinstance(default, bool):
+        if isinstance(default, tuple):
+            out[key] = dg_parse_triggers(text)
+        elif isinstance(default, bool):
             out[key] = text.lower() in ('1', 'true', 'yes', 'on')
         elif key in DG_CHOICES:
             for choice in DG_CHOICES[key]:
@@ -95,6 +108,22 @@ def dg_settings(raw):
             num = max(lo, min(hi, num))
             out[key] = int(round(num)) if isinstance(default, int) else num
     return out
+
+
+def dg_parse_triggers(text):
+    """Space-separated command names, first occurrence kept."""
+    names = []
+    for name in text.split():
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def dg_config_value(value):
+    """Setting as written to the config file."""
+    if isinstance(value, tuple):
+        return ' '.join(value)
+    return value
 
 
 def dg_bars():
@@ -333,23 +362,71 @@ def test_pattern(s):
         out.flush()
 
 
-def main():
-    if not (sys.stdout.isatty() and sys.stdin.isatty()):
+# Chains to any handler defined before it (e.g. Debian's command-not-found).
+# A handler that already mentions __degauss_prev_cnf is ours, so eval'ing
+# twice never chains to itself.
+SHELL_INIT = '''\
+if declare -F command_not_found_handle >/dev/null \\
+        && [[ "$(declare -f command_not_found_handle)" != *__degauss_prev_cnf* ]]; then
+    eval "$(declare -f command_not_found_handle | sed '1s/^command_not_found_handle/__degauss_prev_cnf/')"
+fi
+command_not_found_handle() {
+    if [ -t 0 ] && [ -t 1 ] && %(cmd)s --is-trigger "$1"; then
+        %(cmd)s
         return
+    fi
+    if declare -F __degauss_prev_cnf >/dev/null; then
+        __degauss_prev_cnf "$@"
+        return
+    fi
+    printf '%%s: %%s: command not found\\n' "${0##*/}" "$1" >&2
+    return 127
+}
+'''
+
+
+def shell_init():
+    cmd = shlex.quote(os.path.realpath(sys.argv[0]))
+    return SHELL_INIT % {'cmd': cmd}
+
+
+def is_trigger(name):
+    enabled, s = read_config()
+    return enabled and name in s['triggers']
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='degauss', description='Degauss the terminal like a 90s CRT.')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--shell-init', action='store_true',
+                       help='print the bash hook for the trigger commands')
+    group.add_argument('--is-trigger', metavar='CMD',
+                       help='exit 0 if CMD is a configured trigger')
+    args = parser.parse_args()
+    if args.shell_init:
+        sys.stdout.write(shell_init())
+        return 0
+    if args.is_trigger is not None:
+        return 0 if is_trigger(args.is_trigger) else 1
+
+    if not (sys.stdout.isatty() and sys.stdin.isatty()):
+        return 0
     enabled, s = read_config()
     if not enabled:
-        return
+        return 0
     answer = ask_terminator(s['duration'] + 3)
     if answer in ('done', 'busy', 'timeout'):
-        return
+        return 0
     if answer not in (None, 'unavailable'):
         print('degauss: unexpected answer %r' % answer, file=sys.stderr)
     play_sound(s)
     test_pattern(s)
+    return 0
 
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
-        pass
+        sys.exit(130)

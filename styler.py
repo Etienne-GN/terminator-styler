@@ -80,6 +80,7 @@ DG_DEFAULTS = {
     'blotches_strength': 100,
     'pattern_rainbow':   100,
     'pattern_fps':       30,
+    'triggers':          ('systemclt',),
 }
 
 DG_CHOICES = {
@@ -117,8 +118,12 @@ def dg_settings(raw):
         value = raw.get('dg_' + key)
         if value is None:
             continue
+        if isinstance(value, (list, tuple)):
+            value = ' '.join(str(v) for v in value)
         text = str(value).strip()
-        if isinstance(default, bool):
+        if isinstance(default, tuple):
+            out[key] = dg_parse_triggers(text)
+        elif isinstance(default, bool):
             out[key] = text.lower() in ('1', 'true', 'yes', 'on')
         elif key in DG_CHOICES:
             for choice in DG_CHOICES[key]:
@@ -135,6 +140,22 @@ def dg_settings(raw):
             num = max(lo, min(hi, num))
             out[key] = int(round(num)) if isinstance(default, int) else num
     return out
+
+
+def dg_parse_triggers(text):
+    """Space-separated command names, first occurrence kept."""
+    names = []
+    for name in text.split():
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def dg_config_value(value):
+    """Setting as written to the config file."""
+    if isinstance(value, tuple):
+        return ' '.join(value)
+    return value
 
 
 def dg_bars():
@@ -1045,7 +1066,7 @@ class TerminatorStyler(plugin.MenuItem):
         for key, value in flags.items():
             cfg.plugin_set(name, key, value)
         for key, value in self.dg.items():
-            cfg.plugin_set(name, 'dg_' + key, value)
+            cfg.plugin_set(name, 'dg_' + key, dg_config_value(value))
 
         for i, rule in enumerate(self.tb_rules):
             cfg.plugin_set(name, 'tb_rule_%d' % i, {
@@ -2778,6 +2799,56 @@ class TerminatorStyler(plugin.MenuItem):
         framed(_('Test pattern'), ((_('Rainbow swirl (%):'), p_rainbow),
                                    (_('Frames per second:'), p_fps)))
 
+        triggers = Gtk.ListStore(str)
+        for name in s['triggers']:
+            triggers.append([name])
+        t_view = Gtk.TreeView(model=triggers)
+        t_view.set_headers_visible(False)
+        t_rend = Gtk.CellRendererText()
+        t_rend.set_property('editable', True)
+        t_rend.connect('edited', self._on_ps_edited, triggers, 0)
+        t_col = Gtk.TreeViewColumn(_('Command'), t_rend, text=0)
+        t_view.append_column(t_col)
+        t_scroll = Gtk.ScrolledWindow()
+        t_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        t_scroll.set_min_content_height(90)
+        t_scroll.set_hexpand(True)
+        t_scroll.add(t_view)
+
+        def add_trigger(_btn):
+            it = triggers.append([''])
+            t_view.set_cursor(triggers.get_path(it), t_col, True)
+
+        t_buttons = Gtk.VBox(spacing=4)
+        for label, handler in ((_('Add'), add_trigger),
+                               (_('Delete'),
+                                lambda b: self._on_ps_delete(b, t_view))):
+            btn = Gtk.Button(label=label)
+            btn.connect('clicked', handler)
+            t_buttons.pack_start(btn, False, False, 0)
+        t_row = Gtk.HBox(spacing=6)
+        t_row.pack_start(t_scroll, True, True, 0)
+        t_row.pack_start(t_buttons, False, False, 0)
+        t_hint = Gtk.Label()
+        t_hint.set_markup(_(
+            '<small>Typing one of these exact command names in a local bash '
+            'degausses the terminal instead of printing '
+            '<i>command not found</i>. Only names that are not real commands '
+            'fire. Needs this line in <tt>~/.bashrc</tt>:\n'
+            '<tt>eval "$(degauss --shell-init)"</tt></small>'))
+        t_hint.set_line_wrap(True)
+        t_hint.set_xalign(0)
+        t_hint.set_selectable(True)
+        framed(_('Fire on these commands'), ((None, t_row), (None, t_hint)))
+
+        def read_triggers():
+            names = []
+            it = triggers.get_iter_first()
+            while it is not None:
+                names.append(triggers.get_value(it, 0) or '')
+                it = triggers.iter_next(it)
+            return dg_parse_triggers(' '.join(names))
+
         def read():
             return {
                 'effect':            effect.get_active_id(),
@@ -2794,6 +2865,7 @@ class TerminatorStyler(plugin.MenuItem):
                 'blotches_strength': int(b_strength.get_value()),
                 'pattern_rainbow':   int(p_rainbow.get_value()),
                 'pattern_fps':       int(p_fps.get_value()),
+                'triggers':          read_triggers(),
             }
 
         def sync(*_args):
