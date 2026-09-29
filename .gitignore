@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.bak.*
+test-config/
+.pytest-tmp/
