@@ -78,7 +78,7 @@ Next steps:
   1. (Re)start Terminator -- plugins are only scanned at startup.
   2. Open Preferences > Plugins, enable 'TerminatorStyler'
      (and disable any of the four old plugins it replaces).
-  3. Right-click any terminal > Styler > Preferences...
+  3. Right-click any terminal > Styler Preferences...
      to configure each feature (one tab per feature).
 
 Settings from the four old plugins are migrated automatically the first
