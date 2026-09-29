@@ -400,7 +400,6 @@ class TerminatorStyler(plugin.MenuItem):
         self.ps_watched      = set()
         self.ps_state        = {}    # terminal -> dict
         self.ps_handler_ids  = {}    # terminal -> [(obj, hid)]
-        self.ps_timer_ids    = {}    # terminal -> GLib source id
 
         # Shared timers.
         self.scan_timer_id = None
@@ -445,12 +444,6 @@ class TerminatorStyler(plugin.MenuItem):
                     pass
         self.scan_timer_id = None
         self.poll_timer_id = None
-        for tid in list(self.ps_timer_ids.values()):
-            try:
-                GLib.source_remove(tid)
-            except Exception:
-                pass
-        self.ps_timer_ids.clear()
 
         # Disconnect every signal handler.
         for entries in list(self.tb_handler_ids.values()):
@@ -797,12 +790,6 @@ class TerminatorStyler(plugin.MenuItem):
         for (obj, hid) in self.ps_handler_ids.pop(terminal, []):
             try:
                 obj.disconnect(hid)
-            except Exception:
-                pass
-        tid = self.ps_timer_ids.pop(terminal, None)
-        if tid is not None:
-            try:
-                GLib.source_remove(tid)
             except Exception:
                 pass
         self.ps_state.pop(terminal, None)
