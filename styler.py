@@ -747,6 +747,7 @@ class TerminatorStyler(plugin.MenuItem):
 
         # WindowStyler.
         'ws_padding': 10,
+        'ws_radius': _CORNER_RADIUS,
 
         # MaximiseIndicator.
         'mx_enable_badge':           True,
@@ -785,8 +786,10 @@ class TerminatorStyler(plugin.MenuItem):
 
         # WindowStyler state.
         self.ws_padding      = self.DEFAULTS['ws_padding']
+        self.ws_radius       = self.DEFAULTS['ws_radius']
         self.ws_classes      = {}   # window -> css class
         self.ws_providers    = {}   # window -> CssProvider
+        self.ws_draw_ids     = {}   # window -> draw handler id
 
         # MaximiseIndicator state.
         self.mx_enable_badge          = self.DEFAULTS['mx_enable_badge']
@@ -940,6 +943,10 @@ class TerminatorStyler(plugin.MenuItem):
             self.ws_padding = int(sections.get('ws_padding', self.ws_padding))
         except (TypeError, ValueError):
             pass
+        try:
+            self.ws_radius = int(sections.get('ws_radius', self.ws_radius))
+        except (TypeError, ValueError):
+            pass
 
         # MaximiseIndicator.
         if 'mx_enable_badge' in sections:
@@ -1050,6 +1057,7 @@ class TerminatorStyler(plugin.MenuItem):
             'enable_profileswitcher': self.enable_profileswitcher,
             'enable_degauss':        self.enable_degauss,
             'ws_padding':            self.ws_padding,
+            'ws_radius':             self.ws_radius,
             'mx_enable_badge':       self.mx_enable_badge,
             'mx_enable_title':       self.mx_enable_title,
             'mx_enable_border':      self.mx_enable_border,
@@ -1324,11 +1332,51 @@ class TerminatorStyler(plugin.MenuItem):
         css = ('window.{c} {{'
                '  border-radius: {r}px;'
                '  background-color: transparent;'
-               '}}').format(c=cls, r=_CORNER_RADIUS)
+               '}}'
+               'window.{c} decoration {{'
+               '  border-bottom-left-radius: {r}px;'
+               '  border-bottom-right-radius: {r}px;'
+               '}}').format(c=cls, r=self.ws_radius)
         try:
             provider.load_from_data(css.encode())
         except Exception as exc:
             err('Styler: window CSS failed: %s' % exc)
+        # CSS border-radius does not clip children in GTK3, so the terminals
+        # paint square over the bottom corners; clip them out before drawing.
+        if window not in self.ws_draw_ids:
+            self.ws_draw_ids[window] = window.connect(
+                'draw', self._ws_on_window_draw)
+        window.queue_draw()
+
+    def _ws_on_window_draw(self, window, cr):
+        gdk_window = window.get_window()
+        if gdk_window is not None and gdk_window.get_state() & (
+                Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN
+                | Gdk.WindowState.TILED):
+            return False
+        child = window.get_child()
+        if child is None:
+            return False
+        a = child.get_allocation()
+        r = self.ws_radius
+        if r <= 0:
+            return False
+        right, bottom = a.x + a.width, a.y + a.height
+        # Whole window minus the two bottom corner wedges (even-odd fill).
+        cr.rectangle(0, 0, window.get_allocated_width(),
+                     window.get_allocated_height())
+        cr.move_to(right, bottom)
+        cr.line_to(right - r, bottom)
+        cr.arc_negative(right - r, bottom - r, r, math.pi / 2, 0)
+        cr.close_path()
+        cr.move_to(a.x, bottom)
+        cr.line_to(a.x, bottom - r)
+        cr.arc_negative(a.x + r, bottom - r, r, math.pi, math.pi / 2)
+        cr.close_path()
+        cr.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+        cr.clip()
+        cr.set_fill_rule(cairo.FILL_RULE_WINDING)
+        return False
 
     def _ws_set_vte_margin(self, terminal, value):
         vte = getattr(terminal, 'vte', None)
@@ -1345,6 +1393,13 @@ class TerminatorStyler(plugin.MenuItem):
                 provider.load_from_data(b'')
             except Exception:
                 pass
+        for window, hid in self.ws_draw_ids.items():
+            try:
+                window.disconnect(hid)
+                window.queue_draw()
+            except Exception:
+                pass
+        self.ws_draw_ids.clear()
         for terminal in list(self.terminator.terminals):
             self._ws_set_vte_margin(terminal, 0)
 
@@ -2331,6 +2386,14 @@ class TerminatorStyler(plugin.MenuItem):
             _('Whitespace added inside every terminal pane on all four sides.'))
         grid.attach(p_spin, 1, 0, 1, 1)
 
+        grid.attach(lbl(_('Corner radius (px):')), 0, 1, 1, 1)
+        r_spin = Gtk.SpinButton.new_with_range(0, 40, 1)
+        r_spin.set_value(self.ws_radius)
+        r_spin.set_hexpand(True)
+        r_spin.set_tooltip_text(
+            _('Radius of the rounded window corners; 0 keeps them square.'))
+        grid.attach(r_spin, 1, 1, 1, 1)
+
         box.pack_start(grid, False, False, 0)
 
         hint = Gtk.Label()
@@ -2339,7 +2402,7 @@ class TerminatorStyler(plugin.MenuItem):
             '<b>Internal padding</b> is whitespace inside each terminal pane '
             'on all four sides, applied immediately to every pane including '
             'ones opened later.\n'
-            '<b>Rounded corners</b> are applied to the window (12 px); '
+            '<b>Rounded corners</b> are applied to the window; '
             'a compositor is required for the cut corners to be transparent. '
             'Some compositors draw their own rounding and override this.'
             '</small>'))
@@ -2350,6 +2413,7 @@ class TerminatorStyler(plugin.MenuItem):
         def _apply():
             try:
                 self.ws_padding = int(p_spin.get_value())
+                self.ws_radius = int(r_spin.get_value())
             except Exception:
                 pass
         commit.append(_apply)

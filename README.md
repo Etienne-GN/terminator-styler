@@ -21,7 +21,8 @@ from the **General** tab.
 - Internal padding around every VTE pane (configurable, 0–60 px,
   default 10). Applied as VTE margins, so it works without a compositor
   and covers panes opened later.
-- Rounded window corners (12 px). Requires a compositor (GNOME Shell,
+- Rounded window corners (configurable, 0–40 px, default 12; 0 keeps
+  them square). Requires a compositor (GNOME Shell,
   picom, …) to actually render transparent corners. Some compositors
   draw their own window rounding regardless and override this.
 
@@ -233,6 +234,7 @@ normally edited from the Preferences dialog:
     enable_titlebar = True
     enable_profileswitcher = True
     ws_padding = 10
+    ws_radius = 12
     mx_enable_badge = True
     mx_enable_title = True
     mx_enable_border = True
